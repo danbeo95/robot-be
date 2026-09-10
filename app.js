@@ -3,6 +3,7 @@ const qs = require('node:querystring');
 const { connectDB, RobotHistory } = require('./database/index.js');
 const { registerRobotRoutes } = require('./routes/robot.routes.js');
 const { registerHistoryRoutes } = require('./routes/history.routes.js');
+const { registerLogRoutes } = require('./routes/log.routes.js');
 
 const PORT = process.env.PORT || 8080;
 
@@ -111,6 +112,7 @@ app.ws('/dashboard', {
 // Register REST API routes
 registerRobotRoutes(app);
 registerHistoryRoutes(app);
+registerLogRoutes(app);
 
 app.listen(PORT, (token) => {
   if (token) {

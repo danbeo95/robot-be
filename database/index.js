@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const Robot = require('./models/robot.model');
 const RobotHistory = require('./models/robot-history.model');
+const Log = require('./models/log.model');
 
 const connectDB = async () => {
   try {
@@ -18,8 +19,10 @@ module.exports = {
   models: {
     Robot,
     RobotHistory,
+    Log,
   },
   Robot,
   RobotHistory,
+  Log,
 };
 
