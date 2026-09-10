@@ -1,0 +1,97 @@
+stages:
+  - build
+  - deploy
+
+variables:
+  # AWS and Deployment Configuration
+  AWS_DEFAULT_REGION: "ap-southeast-1"
+  ECR_REPOSITORY: "robot-backend"
+  CONTAINER_NAME: "robot-backend"
+  HOST_PORT: "8080"
+  CONTAINER_PORT: "8080"
+  IMAGE_TAG: "$CI_COMMIT_SHORT_SHA"
+  # DOCKER_TLS_CERTDIR is required for Docker-in-Docker
+  DOCKER_TLS_CERTDIR: "/certs"
+
+# ==============================================================================
+# Build & Push Docker Image to Amazon ECR
+# ==============================================================================
+build_image:
+  stage: build
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  before_script:
+    # Install AWS CLI and required utilities
+    - apk add --no-cache curl python3 py3-pip aws-cli
+    # Authenticate Docker client to Amazon ECR registry
+    - ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+    - aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+  script:
+    - ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+    - FULL_IMAGE_NAME="${ECR_REGISTRY}/${ECR_REPOSITORY}"
+    - echo "Building Docker image ${FULL_IMAGE_NAME}:${IMAGE_TAG}..."
+    - docker build -t "${FULL_IMAGE_NAME}:${IMAGE_TAG}" -t "${FULL_IMAGE_NAME}:latest" .
+    - echo "Pushing Docker image to Amazon ECR..."
+    - docker push "${FULL_IMAGE_NAME}:${IMAGE_TAG}"
+    - docker push "${FULL_IMAGE_NAME}:latest"
+  only:
+    - master
+    - main
+
+# ==============================================================================
+# Deploy Container to AWS EC2 Instance via SSH
+# ==============================================================================
+deploy_to_ec2:
+  stage: deploy
+  image: alpine:3.19
+  before_script:
+    # Install SSH client and bash
+    - apk add --no-cache openssh-client bash
+    # Setup SSH agent and private key
+    - eval $(ssh-agent -s)
+    - echo "${EC2_SSH_PRIVATE_KEY}" | tr -d '\r' | ssh-add - > /dev/null
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    # Disable strict host key checking for non-interactive CI deployment
+    - '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
+  script:
+    - ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+    - FULL_IMAGE_NAME="${ECR_REGISTRY}/${ECR_REPOSITORY}"
+    - echo "Deploying to EC2 instance (${EC2_HOST})..."
+    - |
+      ssh ${EC2_USER}@${EC2_HOST} bash -s <<EOF
+        set -e
+
+        echo "1. Authenticating EC2 Docker with Amazon ECR..."
+        aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+
+        echo "2. Pulling new image: ${FULL_IMAGE_NAME}:${IMAGE_TAG}..."
+        docker pull ${FULL_IMAGE_NAME}:${IMAGE_TAG}
+
+        echo "3. Stopping old container if running..."
+        docker stop ${CONTAINER_NAME} || true
+        docker rm ${CONTAINER_NAME} || true
+
+        echo "4. Running new container..."
+        docker run -d \
+          --name ${CONTAINER_NAME} \
+          --restart unless-stopped \
+          -p ${HOST_PORT}:${CONTAINER_PORT} \
+          -e NODE_ENV=production \
+          -e PORT=${CONTAINER_PORT} \
+          -e MONGODB_URI="${MONGODB_URI}" \
+          ${FULL_IMAGE_NAME}:${IMAGE_TAG}
+
+        echo "5. Verifying container health..."
+        sleep 5
+        docker ps --filter "name=${CONTAINER_NAME}"
+
+        echo "6. Pruning dangling images..."
+        docker image prune -af --filter "until=48h" || true
+
+        echo "Deployment completed successfully!"
+      EOF
+  only:
+    - master
+    - main
